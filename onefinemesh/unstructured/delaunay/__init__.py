@@ -14,6 +14,7 @@ from itertools import combinations
 import random
 
 import matplotlib.pyplot as plt
+from matplotlib import patches
 
 # 2D triangulations
 class DelaunayTriangulation(object):
@@ -85,6 +86,18 @@ def circumcircle(triangle, resolution=16):
     line = sgeom.LineString([circumcentre, triangle.boundary.coords[0]])
     circumradius = line.length
 
+    # determine the resolution
+    if resolution is None:
+        # calculate shortest side of triangle
+        sides = []
+        for i, x in enumerate(triangle.boundary.coords[:-1]):
+            sides.append(sgeom.LineString([x, triangle.boundary.coords[i +  1]]).length)
+        s = min(sides)
+        n_segments = 2 * np.pi * circumradius / s
+        # ensure power of 2
+        n_segments = int(np.power(2, np.ceil(np.log2(n_segments))))
+        resolution = max(n_segments, 16)  # 16 segments minimum
+
     return circumcentre.buffer(circumradius, resolution)
 
 def ghost_circumcircle(triangle, ghost_vertex):
@@ -103,7 +116,7 @@ def ghost_circumcircle(triangle, ghost_vertex):
     Arguments:
         triangle: a shapely.geometry.LineString defining the triangle
                   for which to find the circumcircle.
-        ghost_vertex: a shapely.geometry.Point defining the ghst vertex
+        ghost_vertex: a shapely.geometry.Point defining the ghost vertex
     '''
     # find the edge opposite the ghost vertex
     ball = ghost_vertex.buffer(0.01)
@@ -181,7 +194,7 @@ def triangular_bounding_box(points, scale_factor=3.0):
                       the enclosing circle (>= 1)
 
     Note:
-        to construct the triangle, we first find the distance from the
+        to construct the triangle, we first find the distance from the centre
         of mass to the furthest point, and call it r. We then imagine a
         circle of radius (1 + epsilon) * r, centred on the centre of mass.
         The triangle is then the equilateral triangle that is tangential
@@ -274,8 +287,14 @@ def new_triangulate(points):
 
     # loop through the remaining points in a random order, inserting them
     # into the bounding triangle and constructing the triangulation
-    for p in points:
-        points = points.difference(p)
+    while len(points) > 0:
+        p = random.choice(points)
+#    for p in points:
+        print(len(points))
+        try:
+            points = sgeom.MultiPoint(points.difference(p))
+        except TypeError:
+            points = sgeom.MultiPoint([points.difference(p)])
 
         # determine if the new point is inside the point set
         convex_hull = sgeom.MultiPoint(inserted_points).convex_hull
@@ -285,10 +304,10 @@ def new_triangulate(points):
         for idx, tri in enumerate(triangles):
             ghost_vertices = []
             tri_points = list(set(list(tri.exterior.coords)))
-            real_points = [sgeom.Point(tp) in inserted_points for tp in tri_points] 
+            real_points = [sgeom.Point(tp) in inserted_points for tp in tri_points]
             if all(real_points):
                 # normal triangle
-                c = circumcircle(tri, 64)
+                c = circumcircle(tri, None)
                 if p.within(c):
                     triangles_to_remove[idx] = True
             else:
@@ -300,6 +319,9 @@ def new_triangulate(points):
                 vec1 = np.squeeze(np.diff(np.array(ghost_normal), axis=0))
                 vec2 = np.squeeze(np.diff(np.array(line), axis=0))
                 cos_angle = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+                #print('cos angle', cos_angle)
+                #if sgeom.Point(ghost_vertex).intersects(edge):
+                #    print('inserted point on edge')
                 if cos_angle > 0:
                     triangles_to_remove[idx] = True
                     ghost_vertices.append(ghost_vertex)
@@ -310,31 +332,109 @@ def new_triangulate(points):
         bad_triangles = list(np.array(triangles)[triangles_to_remove])
         containing_union = unary_union(bad_triangles)
 
-#        for pp in inserted_points:
-#            plt.plot(*pp.buffer(0.01).exterior.xy, color='green')
-#        plt.plot(*p.buffer(0.01).exterior.xy, color='red')
-#        for tri in good_triangles:
-#            plt.plot(*tri.exterior.xy, linewidth=2, color='black')
-#        for tri in bad_triangles:
-#            plt.plot(*tri.exterior.xy, linewidth=2, color='blue')
-#        plt.show()
+#        fig = plt.figure(figsize=(18, 10))
+#        fig.add_subplot(1, 2, 1)
+#        plt.plot(*p.buffer(0.02).exterior.xy, color='blue', alpha=0.8)
+#        for ttt in good_triangles:
+#            plt.plot(*ttt.exterior.xy, linewidth=1, color='black', alpha=0.7)
+#        for ttt in bad_triangles:
+#            plt.plot(*ttt.exterior.xy, linewidth=1, color='blue', alpha=0.7)
+#        for ppp in inserted_points:
+#            plt.plot(*ppp.buffer(0.01).exterior.xy, color='red', alpha=0.8)
+#        plt.xlim([-1, 2])
+#        plt.ylim([-1, 2])
+#        fig.add_subplot(1, 2, 2)
+#        if isinstance(containing_union, sgeom.Polygon):
+#            plt.plot(*containing_union.exterior.xy, linewidth=2, color='green')
+#        elif isinstance(containing_union, sgeom.MultiPolygon):
+#            for pol in containing_union:
+#                plt.plot(*pol.exterior.xy, linewidth=2, color='green')
+#        for ppp in inserted_points:
+#            plt.plot(*ppp.buffer(0.01).exterior.xy, color='red', alpha=0.8)
+#        plt.plot(*p.buffer(0.02).exterior.xy, color='blue', alpha=0.8)
+#        plt.xlim([-1, 2])
+#        plt.ylim([-1, 2])
+#        plt.savefig('good_bad_triangles_{}.png'.format(len(points)), dpi=100, bbox_inches='tight')
+#        plt.close()
+
+#        old_triangles = list(np.array(triangles)[~triangles_to_remove])
 
         # remove the containing shape, and construct new triangles
         inserted_points.append(p)
         if isinstance(containing_union, sgeom.Polygon):
+            if isinstance(containing_union.boundary, sgeom.MultiLineString):
+                for line in containing_union.boundary:
+                    print line
             for i, x in enumerate(containing_union.boundary.coords[:-1]):
                 new_tri = sgeom.Polygon([x, containing_union.boundary.coords[i +  1], np.array(p)])
                 tri_points = list(set(list(new_tri.exterior.coords)))
                 real_points = [sgeom.Point(tp) in inserted_points for tp in tri_points]
                 if all(real_points):
+#                    area_of_intersection = sum([new_tri.intersection(ttt).area for ttt in old_triangles])
+#                    if area_of_intersection > 0:
+#                        plt.plot(*new_tri.exterior.xy, linewidth=1, color='black')
+#                        for ppp in inserted_points:
+#                            plt.plot(*ppp.buffer(0.005).exterior.xy, color='green')
+#                        plt.plot(*p.buffer(0.005).exterior.xy, color='blue')
+#                        #for ttt in good_triangles:
+#                        #    xx, yy = ttt.exterior.coords.xy
+#                        #    pxy = np.array([xx, yy]).T
+#                        #    polygon_shape = patches.Polygon(pxy, facecolor='red', edgecolor='none', alpha=0.3)
+#                        #    plt.gca().add_patch(polygon_shape)
+#                        for ttt in bad_triangles:
+#                            xx, yy = ttt.exterior.coords.xy
+#                            pxy = np.array([xx, yy]).T
+#                            polygon_shape = patches.Polygon(pxy, edgecolor='none', alpha=0.3)
+#                            plt.gca().add_patch(polygon_shape)
+#                        for ttt in old_triangles:
+#                            if new_tri.intersection(ttt).area > 0:
+#                                plt.plot(*ttt.exterior.xy, linewidth=1, color='black', alpha=0.5)
+#                                ccc = circumcircle(ttt, 64)
+#                                plt.plot(*ccc.exterior.xy, linewidth=1, color='black', alpha=0.5)
+#                            else:
+#                                plt.plot(*ttt.exterior.xy, linewidth=1, color='black', alpha=0.1)
+#                        plt.xlim([-1, 2])
+#                        plt.ylim([-1, 2])
+#                        plt.show()
+#                    #print('area of intersection', area_of_intersection)
                     good_triangles.append(new_tri)
         elif isinstance(containing_union, sgeom.MultiPolygon):
             for pol in containing_union:
+                if isinstance(pol.boundary, sgeom.MultiLineString):
+                    for line in pol.boundary:
+                        print line
                 for i, x in enumerate(pol.boundary.coords[:-1]):
                     new_tri = sgeom.Polygon([x, pol.boundary.coords[i +  1], np.array(p)])
                     tri_points = list(set(list(new_tri.exterior.coords)))
                     real_points = [sgeom.Point(tp) in inserted_points for tp in tri_points]
                     if all(real_points):
+#                        area_of_intersection = sum([new_tri.intersection(ttt).area for ttt in old_triangles])
+#                        if area_of_intersection > 0:
+#                            plt.plot(*new_tri.exterior.xy, linewidth=1, color='black')
+#                            for ppp in inserted_points:
+#                                plt.plot(*ppp.buffer(0.005).exterior.xy, color='green')
+#                            plt.plot(*p.buffer(0.005).exterior.xy, color='blue')
+#                            #for ttt in good_triangles:
+#                            #    xx, yy = ttt.exterior.coords.xy
+#                            #    pxy = np.array([xx, yy]).T
+#                            #    polygon_shape = patches.Polygon(pxy, facecolor='red', edgecolor='none', alpha=0.3)
+#                            #    plt.gca().add_patch(polygon_shape)
+#                            for ttt in bad_triangles:
+#                                xx, yy = ttt.exterior.coords.xy
+#                                pxy = np.array([xx, yy]).T
+#                                polygon_shape = patches.Polygon(pxy, edgecolor='none', alpha=0.3)
+#                                plt.gca().add_patch(polygon_shape)
+#                            for ttt in old_triangles:
+#                                if new_tri.intersection(ttt).area > 0:
+#                                    plt.plot(*ttt.exterior.xy, linewidth=1, color='black', alpha=0.5)
+#                                    ccc = circumcircle(ttt, 64)
+#                                    plt.plot(*ccc.exterior.xy, linewidth=1, color='black', alpha=0.5)
+#                                else:
+#                                    plt.plot(*ttt.exterior.xy, linewidth=1, color='black', alpha=0.1)
+#                            plt.xlim([-1, 2])
+#                            plt.ylim([-1, 2])
+#                            plt.show()
+#                        #print('area of intersection', area_of_intersection)
                         good_triangles.append(new_tri)
 
         # recompute ghost triangles
@@ -401,7 +501,8 @@ def triangulate(points):
         plt.show()
         # remove the containing shape, and construct new triangles
         for i, x in enumerate(containing_union.boundary.coords[:-1]):
-            new_tri = sgeom.Polygon([x, containing_union.boundary.coords[i +  1], np.array(p)])
+            new_tri = sgeom.Polygon([x, containing_union.boundary.coords[i +  1],
+                                     np.array(p)])
             good_triangles.append(new_tri)
         triangles = good_triangles
 #        for pp in plot_points:
@@ -420,12 +521,12 @@ def triangulate(points):
 
 
 if __name__ == "__main__":
-#    np.random.seed(3)
-    n = 50
-    points = sgeom.MultiPoint([np.random.random(2) for _ in range(n)])
+    for j in range(1):
+        np.random.seed(j)
+        n = 150
+        points = sgeom.MultiPoint([np.random.random(2) for _ in range(n)])
 
-
-    triangles = new_triangulate(points)
+        triangles = new_triangulate(points)
 #    triangles = triangulate(points)
 
     fig = plt.figure()
