@@ -132,7 +132,8 @@ def insert_segment(segment, containing_triangles):
     # a new edge
     new_edges = []
     while len(intersecting_edges) > 0:
-        edge = intersecting_edges.pop()
+        edge = random.choice(intersecting_edges)
+        intersecting_edges.remove(edge)
         connected_triangles = []
         for tri in containing_triangles:
             if edge.intersects(tri):
@@ -140,19 +141,9 @@ def insert_segment(segment, containing_triangles):
                     connected_triangles.append(tri)
         tri1, tri2 = connected_triangles
         union_polygon = unary_union(connected_triangles)
-        lines = []
-        for p1, p2 in zip(union_polygon.boundary.coords[:-1], union_polygon.boundary.coords[1:]):
-            lines.append(sgeom.LineString([p1, p2]))
-        lines.append(lines[0])
-        angles = []
-        for i, line in enumerate(lines[:-1]):
-            line2 = lines[i + 1]
-            v1 = np.array(line)[0] - np.array(line)[1]
-            v2 = np.array(line2)[0] - np.array(line2)[1]
-            theta = np.arccos(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
-            angles.append(theta)
-        if any(np.array(angles) < 0):
-            print(angles)
+        if not union_polygon.equals(union_polygon.convex_hull):
+            intersecting_edges.insert(0, edge)
+            continue
         for tri in connected_triangles:
             containing_triangles.remove(tri)
         tri1_coords = set(tri1.boundary.coords)
@@ -356,9 +347,19 @@ def ghost_triangles(points, infinity=100.0):
     # calculate the edges of the convex hull
     convex_hull = points.convex_hull
     boundary = convex_hull.boundary
+    # workaround for co-linear points, whice are missing from the convex hull
+    index = [p.intersects(boundary) for p in points]
+    points_on_boundary = np.array(points)[index]
+    if len(boundary.coords) <= len(points_on_boundary):
+        # same length since polygon is closed, so one point is repeated
+        centre = convex_hull.centroid
+        # sort into (clockwise) order
+        shifted_points = points_on_boundary - np.array(centre)
+        angles = np.arctan2(shifted_points[:, 1], shifted_points[:, 0])
+        points_on_boundary = points_on_boundary[np.argsort(angles)]
+        boundary = sgeom.Polygon(points_on_boundary).boundary
     boundary_lines = []
-    for i in range(len(boundary.coords) - 1):
-        p1, p2 = np.array(boundary.coords)[i:i+2]
+    for p1, p2 in zip(boundary.coords[:-1], boundary.coords[1:]):
         boundary_lines.append(sgeom.LineString([p1, p2]))
 
     # calculate the ghost triangles
@@ -374,12 +375,6 @@ def ghost_triangles(points, infinity=100.0):
                     ghost_triangles.append(sgeom.Polygon([c, v1, v2]))
             else:
                 ghost_triangles.append(sgeom.Polygon([c, v1, v2]))
-
-    if not len(boundary_lines) == len(ghost_triangles):
-        plt.plot(*convex_hull.exterior.xy, linewidth=3, color='black')
-        for tri in ghost_triangles:
-            plt.plot(*tri.exterior.xy, linewidth=2, color='blue')
-        plt.show()
 
     return ghost_triangles
 
@@ -408,7 +403,6 @@ def triangulate(points):
     # into the bounding triangle and constructing the triangulation
     while len(points) > 0:
         p = random.choice(points)
-        print(len(points))
         try:
             points = sgeom.MultiPoint(points.difference(p))
         except TypeError:
@@ -421,8 +415,6 @@ def triangulate(points):
         triangles_to_remove = np.zeros(len(triangles), dtype=bool)
         for idx, tri in enumerate(triangles):
             ghost_vertices = []
-            #plt.plot(*tri.exterior.xy)
-            #plt.show()
             tri_points = sgeom.MultiPoint(list(set(list(tri.exterior.coords))))
             real_points = inserted_points.intersection(tri_points)
             centroid = tuple(tri.centroid.coords)[0]
@@ -438,17 +430,13 @@ def triangulate(points):
             elif len(real_points) == 2:
                 # ghost triangle
                 ghost_vertex = tri_points.difference(inserted_points)
-                #print(tri_points, inserted_points)
                 ghost_normal, edge = ghost_circumcircle(tri, ghost_vertex)
                 mid_point = edge.interpolate(0.5, normalized=True)
                 line = sgeom.LineString([mid_point, p])
                 vec1 = np.squeeze(np.diff(np.array(ghost_normal), axis=0))
                 vec2 = np.squeeze(np.diff(np.array(line), axis=0))
                 cos_angle = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-                #print('cos angle', cos_angle)
-                #if sgeom.Point(ghost_vertex).intersects(edge):
-                #    print('inserted point on edge')
-                if cos_angle > 0:
+                if sgeom.Point(p).intersects(edge) or cos_angle > 0:
                     triangles_to_remove[idx] = True
                     ghost_vertices.append(ghost_vertex)
             else:
@@ -464,15 +452,6 @@ def triangulate(points):
             except KeyError:
                 pass
         containing_union = unary_union(bad_triangles)
-
-#        fig = plt.figure()
-#        fig.add_subplot(1, 1, 1)
-#        plt.plot(*p.buffer(0.01).exterior.xy, color='red')
-#        for tri in good_triangles:
-#            plt.plot(*tri.exterior.xy, color='black')
-#        for tri in bad_triangles:
-#            plt.plot(*tri.exterior.xy, color='blue')
-#        plt.show()
 
         # remove the containing shape, and construct new triangles
         inserted_points = inserted_points.union(p)
@@ -506,7 +485,10 @@ def triangulate(points):
         # recompute ghost triangles
         ghosts = sgeom.MultiPolygon(ghost_triangles(inserted_points))
         new_ghosts = ghosts.difference(unary_union(good_triangles))
-        good_triangles.extend(list(new_ghosts))
+        if isinstance(new_ghosts, sgeom.Polygon):
+            good_triangles.append(new_ghosts)
+        elif isinstance(new_ghosts, sgeom.MultiPolygon):
+            good_triangles.extend(list(new_ghosts))
 
         triangles = good_triangles
 
@@ -551,12 +533,14 @@ if __name__ == "__main__":
     sys.path.append('../../tests')
     import alphabet
 
-    c = alphabet.letter_to_polygon('e')
+#    import string
+#    for letter in string.ascii_lowercase:
+    c = alphabet.letter_to_polygon('c')
 
 #    dt = DelaunayTriangulation(lake_michigan)
 #    dt = DelaunayTriangulation(lake_superior)
-    dt = ConstrainedDelaunayTriangulation(star)
-#    dt = ConstrainedDelaunayTriangulation(c)
+#    dt = ConstrainedDelaunayTriangulation(star)
+    dt = ConstrainedDelaunayTriangulation(c)
 
     fig = plt.figure()
     fig.add_subplot(1, 2, 1)
