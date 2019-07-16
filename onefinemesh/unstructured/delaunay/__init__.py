@@ -32,10 +32,37 @@ class Triangle(sgeom.Polygon):
             ghost: a boolean describing whether the triangle is a ghost
                    triangle or not
         '''
-        super().__init__(points)
+        # ensure the points are counterclockwise
+        if len(points) != 3:
+            raise ValueError('must provide 3 points')
+        centre = sum(np.array(p) for p in points) / len(points)
+        theta = []
+        for p in points:
+            vec = np.array(p) - centre
+            theta.append((np.arctan2(vec[1], vec[0]) + 2 * np.pi) % (2 * np.pi))
+        idx = np.argsort(theta)
+
+        super().__init__(np.array(points)[idx])
         self.vertices = sgeom.MultiPoint(points)
         self.is_ghost = ghost
         self.centre = self.centroid.coords[0]
+
+        # circumcircle
+        if not self.is_ghost:
+            cc, cr = circumcircle(self)
+            self.circumcentre = cc
+            self.circumradius = cr
+
+        # calculate the interior angles
+        self.angles = []
+        for i, c in enumerate(self.vertices):
+            c_m = np.array(self.vertices[i - 1])
+            c_p = np.array(self.vertices[(i + 1) % len(self.vertices)])
+            vec_m = np.array(c) - c_m
+            vec_p = np.array(c) - c_p
+            num = np.dot(vec_m, vec_p)
+            denom = np.linalg.norm(vec_m) * np.linalg.norm(vec_p)
+            self.angles.append(np.arccos(num / denom))
 
 
 # 2D triangulations
@@ -47,6 +74,8 @@ class DelaunayTriangulation(object):
         Arguments:
             shape: a shapely.geometry defining the shape to be triangulated
         '''
+        self.shape = shape
+
         if isinstance(shape, sgeom.Polygon):
             points = list(shape.exterior.coords)
             for interior in shape.interiors:
@@ -62,7 +91,42 @@ class DelaunayTriangulation(object):
             msg = 'given shape is of type {}, require MultiPoint, MultiLineString, Polygon or MultiPolygon'.format(type(shape))
             raise TypeError(msg)
         self.points = sgeom.MultiPoint(points)
+
+        # determine the edges of the shape
+        edges = []
+        if isinstance(shape, sgeom.MultiPoint):
+            self.segments = None
+        elif isinstance(shape, sgeom.MultiLineString):
+            self.segments = shape
+        else:
+            # Polygon
+            self.segments = []
+            exterior = sgeom.LineString(shape.exterior)
+            for p1, p2 in zip(exterior.coords[:-1], exterior.coords[1:]):
+                self.segments.append(sgeom.LineString((p1, p2)))
+            for interior in shape.interiors:
+                for p1, p2 in zip(interior.coords[:-1], interior.coords[1:]):
+                    self.segments.append(sgeom.LineString((p1, p2)))
+            self.segments = sgeom.MultiLineString(self.segments)
+
+        # calculate the Delaunay triangulation
         self.triangles = triangulate(self.points)
+        self.real_triangles = [tri for tri in self.triangles if not tri.is_ghost]
+
+    # method for adding additional points, as required for refinement
+    def insert_point(self, point):
+        '''
+        Method to insert a point into the Delaunay triangulation, and
+        recompute the triangulation.
+
+        Arguments:
+            point: the point to be inserted into the triangulation
+        '''
+        self.points, triangles = insert_point(point, self.points,
+                                              self.triangles)
+        # exclude ghost triangles
+        self.triangles = triangles
+        self.real_triangles = [tri for tri in triangles if not tri.is_ghost]
 
 
 class ConstrainedDelaunayTriangulation(DelaunayTriangulation):
@@ -77,27 +141,9 @@ class ConstrainedDelaunayTriangulation(DelaunayTriangulation):
         # construct the Delaunay triangulation
         super().__init__(shape)
 
-        # determine the edges of the shape
-        edges = []
-        if isinstance(shape, sgeom.MultiPoint):
-            msg = '{} has no edges to constrain the triangulation'.format(type(shape))
-            raise TypeError(msg)
-        elif isinstance(shape, sgeom.MultiLineString):
-            self.edges = shape
-        else:
-            # Polygon
-            self.edges = []
-            exterior = sgeom.LineString(shape.exterior)
-            for p1, p2 in zip(exterior.coords[:-1], exterior.coords[1:]):
-                self.edges.append(sgeom.LineString((p1, p2)))
-            for interior in shape.interiors:
-                for p1, p2 in zip(interior.coords[:-1], interior.coords[1:]):
-                    self.edges.append(sgeom.LineString((p1, p2)))
-            self.edges = sgeom.MultiLineString(self.edges)
-
         # determine which of the triangles intersect the edges
         self.triangles = np.array(self.triangles)
-        for edge in self.edges:
+        for edge in self.segments:
             triangles_to_remove = np.zeros(len(self.triangles), dtype=bool)
             for idx, tri in enumerate(self.triangles):
                 if edge.intersects(tri.boundary):
@@ -114,6 +160,20 @@ class ConstrainedDelaunayTriangulation(DelaunayTriangulation):
 
         # remove any triangles not in the provided shape
         self.triangles = [tri for tri in self.triangles if shape.contains(tri)]
+
+    # method for adding additional points, as required for refinement
+    def insert_point(self, point):
+        '''
+        Method to insert a point into the constrained Delaunay triangulation,
+        and recompute the triangulation.
+
+        Arguments:
+            point: the point to be inserted into the triangulation
+        '''
+        self.points, triangles = insert_point(point, self.points,
+                                              self.triangles)
+
+        self.triangles = [tri for tri in triangles if self.shape.buffer(1e-10).contains(tri)]
 
 
 class ConformalDelaunayTriangulation(ConstrainedDelaunayTriangulation):
@@ -145,10 +205,97 @@ class ConformalDelaunayTriangulation(ConstrainedDelaunayTriangulation):
             ax.add_patch(patch)
         plt.show()
 
-# 3D tetrahedralisations
-#class DelaunayTetrahedralisation(object)
 
 # generic functions
+def insert_point(point, vertices, triangles):
+    '''
+    Insert a point into a triangulation, recalculating the triangulation as
+    appropriate.
+
+    Arguments:
+        point: the point to be inserted
+        vertices: the vertices of the triangulation
+        triangles: the triangles of the triangulation to be recalculated
+    '''
+    triangles_to_remove = np.zeros(len(triangles), dtype=bool)
+    for idx, tri in enumerate(triangles):
+        ghost_vertices = []
+        tri_points = tri.vertices
+        if tri.is_ghost:
+            # ghost triangle
+            ghost_vertex = tri_points.difference(vertices)
+            ghost_normal, edge = ghost_circumcircle(tri, ghost_vertex)
+            mid_point = edge.interpolate(0.5, normalized=True)
+            line = sgeom.LineString([mid_point, point])
+            vec1 = np.squeeze(np.diff(np.array(ghost_normal), axis=0))
+            vec2 = np.squeeze(np.diff(np.array(line), axis=0))
+            cos_angle = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+            if sgeom.Point(point).intersects(edge) or cos_angle > 0:
+                triangles_to_remove[idx] = True
+                ghost_vertices.append(ghost_vertex)
+        else:
+            # normal triangle
+            if point_within_circumcircle(point, tri.circumcentre,
+                                         tri.circumradius):
+                triangles_to_remove[idx] = True
+
+    # construct the union of the containing triangles, and remove
+    # from the triangulation
+    good_triangles = list(np.array(triangles)[~triangles_to_remove])
+    bad_triangles = list(np.array(triangles)[triangles_to_remove])
+    containing_union = unary_union(bad_triangles)
+
+    # remove the containing shape, and construct new triangles
+    vertices = vertices.union(point)
+
+    # associate each segment of the containing union with a bad triangle
+    if not isinstance(containing_union, (sgeom.Polygon,
+                                         sgeom.MultiPolygon)):
+        msg = 'expected the cavity to be of type Polygon or MultiPolygon, got {}'.format(type(containing_union))
+        raise TypeError(msg)
+
+    # remove ghost triangles
+    if isinstance(containing_union, sgeom.Polygon):
+        for i, x in enumerate(containing_union.boundary.coords[:-1]):
+            edge = sgeom.LineString([x, containing_union.boundary.coords[i +  1]])
+            if point.buffer(1e-9).intersects(edge):
+                continue
+            else:
+                new_tri = Triangle([x, containing_union.boundary.coords[i +  1],
+                                    np.array(point)])
+                tri_points = new_tri.vertices
+                real_points = vertices.intersection(tri_points)
+                if len(real_points) == 3:
+                    good_triangles.append(new_tri)
+    elif isinstance(containing_union, sgeom.MultiPolygon):
+        for pol in containing_union:
+            for i, x in enumerate(pol.boundary.coords[:-1]):
+                edge = sgeom.LineString([x, pol.boundary.coords[i +  1]])
+                if point.buffer(1e-9).intersects(edge):
+                    continue
+                else:
+                    new_tri = Triangle([x, pol.boundary.coords[i +  1],
+                                        np.array(point)])
+                    tri_points = new_tri.vertices
+                    real_points = vertices.intersection(tri_points)
+                    if len(real_points) == 3:
+                        good_triangles.append(new_tri)
+
+    # recompute ghost triangles
+    ghosts = sgeom.MultiPolygon(ghost_triangles(vertices))
+    for t in good_triangles:
+        if not t.is_valid:
+            print('invalid triangle', t)
+    new_ghosts = ghosts.difference(unary_union(good_triangles))
+    if isinstance(new_ghosts, sgeom.Polygon):
+        good_triangles.append(Triangle(new_ghosts.exterior.coords[:-1], ghost=True))
+    elif isinstance(new_ghosts, sgeom.MultiPolygon):
+        good_triangles.extend([Triangle(g.exterior.coords[:-1], ghost=True) for g in new_ghosts])
+
+    triangles = good_triangles
+    return vertices, triangles
+
+
 def insert_segment(segment, containing_triangles):
     '''
     Re-triangulate a polygon
@@ -231,13 +378,13 @@ def insert_segment(segment, containing_triangles):
         cc2, cr2 = circumcircle(tri2)
         if any([point_within_circumcircle(p, cc1, cr1) for p in tri2.boundary.coords]):
             # not locally Delaunay, so flip triangles
-            tri1_coords = set(tri1.boundary.coords)
-            tri2_coords = set(tri2.boundary.coords)
+            tri1_coords = tri1.vertices
+            tri2_coords = tri2.vertices
             connected_vertices = tri1_coords.intersection(tri2_coords)
             unconnected_vertices = tri1_coords.symmetric_difference(tri2_coords)
             flipped_triangles = []
             for v in connected_vertices:
-                new_tri = Triangle(tuple(unconnected_vertices) + (v,))
+                new_tri = Triangle(unconnected_vertices.union(v))
                 flipped_triangles.append(new_tri)
             t1, t2 = flipped_triangles
             new_triangles.remove(tri1)
@@ -259,7 +406,7 @@ def point_within_circumcircle(point, circumcentre, circumradius):
     '''
     connecting_vector = np.array(point) - np.array(circumcentre)
     distance = np.linalg.norm(connecting_vector)
-    return distance <= circumradius
+    return distance <= (1 - 1e-9) * circumradius
 
 
 #@profile
@@ -278,15 +425,15 @@ def circumcircle(triangle):
     a = np.linalg.det(np.array([[p1.x, p1.y, 1],
                                 [p2.x, p2.y, 1],
                                 [p3.x, p3.y, 1]]))
-    b_x = -np.linalg.det(np.array([[np.dot(p1, p1), p1.y, 1],
-                                   [np.dot(p2, p2), p2.y, 1],
-                                   [np.dot(p3, p3), p3.y, 1]]))
+    b_x = - np.linalg.det(np.array([[np.dot(p1, p1), p1.y, 1],
+                                    [np.dot(p2, p2), p2.y, 1],
+                                    [np.dot(p3, p3), p3.y, 1]]))
     b_y = np.linalg.det(np.array([[np.dot(p1, p1), p1.x, 1],
                                   [np.dot(p2, p2), p2.x, 1],
                                   [np.dot(p3, p3), p3.x, 1]]))
-    c = -np.linalg.det(np.array([[np.dot(p1, p1), p1.x, p1.y],
-                                 [np.dot(p2, p2), p2.x, p2.y],
-                                 [np.dot(p3, p3), p3.x, p3.y]]))
+    c = - np.linalg.det(np.array([[np.dot(p1, p1), p1.x, p1.y],
+                                  [np.dot(p2, p2), p2.x, p2.y],
+                                  [np.dot(p3, p3), p3.x, p3.y]]))
     x_c = -b_x / (2 * a)
     y_c = -b_y / (2 * a)
     circumcentre = sgeom.Point((x_c, y_c))
@@ -319,6 +466,7 @@ def ghost_circumcircle(triangle, ghost_vertex):
     for i in range(len(vertices) - 1):
         edges.append(sgeom.LineString([vertices[i], vertices[i + 1]]))
     idx = np.squeeze(np.where([not ball.intersects(edge) for edge in edges]))
+    #print(idx)
     opposite_edge = edges[idx]
 
     # construct the normal to the edge, oriented towards the ghost vertex
@@ -389,6 +537,8 @@ def ghost_triangles(points, infinity=100.0):
     # calculate the edges of the convex hull
     convex_hull = points.convex_hull
     boundary = convex_hull.boundary
+    if not isinstance(boundary, sgeom.LineString):
+        print('convex hull is type {}'.format(type(boundary)))
     # workaround for co-linear points, whice are missing from the convex hull
     index = [p.intersects(boundary) for p in points]
     points_on_boundary = np.array(points)[index]
@@ -430,7 +580,6 @@ def triangulate(points):
                 triangulated
     '''
     triangles = []
-    cache = {}
 
     # choose three random points in the point set to form an initial triangle
     inserted_points = sgeom.MultiPoint(random.sample(list(points), 3))
@@ -449,131 +598,16 @@ def triangulate(points):
             points = sgeom.MultiPoint(points.difference(p))
         except TypeError:
             points = sgeom.MultiPoint([points.difference(p)])
-
-        # determine if the new point is inside the point set
-        convex_hull = inserted_points.convex_hull
-        interior_point = p.within(convex_hull)
-
-        triangles_to_remove = np.zeros(len(triangles), dtype=bool)
-        for idx, tri in enumerate(triangles):
-            ghost_vertices = []
-            tri_points = tri.vertices
-            if not tri.is_ghost:
-                # normal triangle
-                if tri.centre in cache:
-                    cc, cr = cache[tri.centre]
-                else:
-                    cc, cr = circumcircle(tri)
-                    cache[tri.centre] = cc, cr
-                if point_within_circumcircle(p, cc, cr):
-                    triangles_to_remove[idx] = True
-            else:
-                # ghost triangle
-                ghost_vertex = tri_points.difference(inserted_points)
-                ghost_normal, edge = ghost_circumcircle(tri, ghost_vertex)
-                mid_point = edge.interpolate(0.5, normalized=True)
-                line = sgeom.LineString([mid_point, p])
-                vec1 = np.squeeze(np.diff(np.array(ghost_normal), axis=0))
-                vec2 = np.squeeze(np.diff(np.array(line), axis=0))
-                cos_angle = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-                if sgeom.Point(p).intersects(edge) or cos_angle > 0:
-                    triangles_to_remove[idx] = True
-                    ghost_vertices.append(ghost_vertex)
-
-        # construct the union of the containing triangles, and remove
-        # from the triangulation
-        good_triangles = list(np.array(triangles)[~triangles_to_remove])
-        bad_triangles = list(np.array(triangles)[triangles_to_remove])
-        for tri in bad_triangles:
-            if tri.centre in cache:
-                del cache[tri.centre]
-        containing_union = unary_union(bad_triangles)
-
-        # remove the containing shape, and construct new triangles
-        inserted_points = inserted_points.union(p)
-
-        # associate each segment of the containing union with a bad triangle
-        if not isinstance(containing_union, (sgeom.Polygon,
-                                             sgeom.MultiPolygon)):
-            msg = 'expected the cavity to be of type Polygon or MultiPolygon, got {}'.format(type(containing_union))
-            raise TypeError(msg)
-
-        if isinstance(containing_union, sgeom.Polygon):
-            cavity_edge = containing_union.boundary
-            if not isinstance(cavity_edge, sgeom.LineString):
-                for pp in inserted_points:
-                    plt.plot(*pp.buffer(0.01).exterior.xy, color='red', alpha=0.5)
-                for bt in bad_triangles:
-                    plt.plot(*bt.exterior.xy, color='gray', alpha=0.7, linestyle='--')
-                for line in cavity_edge:
-                    plt.plot(*line.xy)
-                plt.show()
-        else:
-            # MultiPolygon
-            for pol in containing_union:
-                cavity_edge = pol.boundary
-                if not isinstance(cavity_edge, sgeom.LineString):
-                    for pp in inserted_points:
-                        plt.plot(*pp.buffer(0.01).exterior.xy, color='red', alpha=0.5)
-                    for bt in bad_triangles:
-                        plt.plot(*bt.exterior.xy, color='gray', alpha=0.7, linestyle='--')
-                    for line in cavity_edge:
-                        plt.plot(*line.xy)
-                    plt.show()
-
-
-        # remove ghost triangles
-        if isinstance(containing_union, sgeom.Polygon):
-            if isinstance(containing_union.boundary, sgeom.MultiLineString):
-                for line in containing_union.boundary:
-                    plt.plot(*line.xy)
-                    print(line)
-                plt.show()
-            for i, x in enumerate(containing_union.boundary.coords[:-1]):
-                new_tri = Triangle([x, containing_union.boundary.coords[i +  1], np.array(p)])
-                tri_points = sgeom.MultiPoint(list(set(list(new_tri.exterior.coords))))
-                real_points = inserted_points.intersection(tri_points)
-                if len(real_points) == 3:
-                    good_triangles.append(new_tri)
-        elif isinstance(containing_union, sgeom.MultiPolygon):
-            for pol in containing_union:
-                if isinstance(pol.boundary, sgeom.MultiLineString):
-                    for line in pol.boundary:
-                        plt.plot(*line.xy)
-                        print(line)
-                    plt.show()
-                for i, x in enumerate(pol.boundary.coords[:-1]):
-                    new_tri = Triangle([x, pol.boundary.coords[i +  1], np.array(p)])
-                    tri_points = sgeom.MultiPoint(list(set(list(new_tri.exterior.coords))))
-                    real_points = inserted_points.intersection(tri_points)
-                    if len(real_points) == 3:
-                        good_triangles.append(new_tri)
-
-        # recompute ghost triangles
-        ghosts = sgeom.MultiPolygon(ghost_triangles(inserted_points))
-        new_ghosts = ghosts.difference(unary_union(good_triangles))
-        if isinstance(new_ghosts, sgeom.Polygon):
-            good_triangles.append(Triangle(new_ghosts.exterior.coords[:-1], ghost=True))
-        elif isinstance(new_ghosts, sgeom.MultiPolygon):
-            good_triangles.extend([Triangle(g.exterior.coords[:-1], ghost=True) for g in new_ghosts])
-
-        triangles = good_triangles
+        inserted_points, triangles = insert_point(p, inserted_points, triangles)
 
     # reset points
     points = inserted_points
 
-    interior_triangles = []
-    for tri in triangles:
-        tri_points = sgeom.MultiPoint(list(set(list(tri.exterior.coords))))
-        real_points = inserted_points.intersection(tri_points)
-        if len(real_points) == 3:
-            interior_triangles.append(tri)
-
-    return interior_triangles
+    return triangles#[tri for tri in triangles if not tri.is_ghost]
 
 
 if __name__ == "__main__":
-    n = 400
+    n = 100
     points = sgeom.MultiPoint([np.random.random(2) for _ in range(n)])
 
     filename = "/home/dbentley/code/OneFineMesh/onefinemesh/tests/ne_10m_lakes.shp"
@@ -602,26 +636,33 @@ if __name__ == "__main__":
 
 #    import string
 #    for letter in string.ascii_lowercase:
-    c = alphabet.letter_to_polygon('A')
+    c = alphabet.letter_to_polygon('k')
 
 #    dt = DelaunayTriangulation(points)
 #    dt = ConformalDelaunayTriangulation(lake_michigan)
 #    dt = ConstrainedDelaunayTriangulation(lake_superior)
 #    dt = ConstrainedDelaunayTriangulation(star)
-    dt = ConformalDelaunayTriangulation(c)
+    dt = ConstrainedDelaunayTriangulation(c)
+
+    from refinements import ruppert
+
+    ruppert(dt, alpha=30)
 
     fig = plt.figure()
     fig.add_subplot(1, 2, 1)
+    plt.plot(*c.exterior.xy, color='blue', linewidth=2)
+    for interior in c.interiors:
+        plt.plot(*interior.xy, color='blue', linewidth=2)
     for t in dt.triangles:
-        plt.plot(*t.exterior.xy, linewidth=2, color='black')
-    #for e in dt.edges:
+        plt.plot(*t.exterior.xy, linewidth=1, color='black')
+    #for e in dt.segments:
     #    plt.plot(*e.xy, linewidth=2, color='blue')
     for p in dt.points:
         plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
     fig.add_subplot(1, 2, 2)
     triangles = shapely_triangulate(dt.points)
     for t in triangles:
-        plt.plot(*t.exterior.xy, linewidth=2, color='black')
+        plt.plot(*t.exterior.xy, linewidth=1, color='black')
     for p in dt.points:
         plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
     plt.show()
