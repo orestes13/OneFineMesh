@@ -1,0 +1,6 @@
+# Top-level files
+prune .github
+exclude .gitignore
+
+global-exclude *.py[cod]
+global-exclude __pycache__
