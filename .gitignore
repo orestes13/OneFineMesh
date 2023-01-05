@@ -28,6 +28,7 @@ MANIFEST
 
 # Sphinx documentation
 docs/_build/
+docs/api/
 
 # Jupyter Notebook
 .ipynb_checkpoints
