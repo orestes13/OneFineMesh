@@ -9,6 +9,7 @@ from matplotlib.font_manager import FontProperties
 from matplotlib.patches import Polygon
 import matplotlib.pyplot as plt
 
+
 def letter_to_polygon(letter, **kwargs):
     '''
     Construct a Polygon from a letter.
@@ -37,11 +38,18 @@ def letter_to_polygon(letter, **kwargs):
 
     return geometry
 
-if __name__ == "__main__":
-    for letter in string.ascii_lowercase:
-        a = letter_to_polygon(letter, scale=(2, 1))
+@pytest.mark.parametrize("letter", ["a", "b", "c"])
+#@pytest.mark.parametrize("letter", list(string.ascii_lowercase))
+def test_delauney_alphabet(test_input, expected):
+    letter_to_polygon(letter, scale=(2, 1))
+    assert True
 
-        plt.plot(*a.exterior.xy, marker='o')
-        for interior in a.interiors:
-            plt.plot(*interior.xy, marker='o')
-        plt.show()
+
+if __name__ == "__main__":
+    pass
+#    a = letter_to_polygon(letter, scale=(2, 1))
+
+#    plt.plot(*a.exterior.xy, marker='o')
+#    for interior in a.interiors:
+#        plt.plot(*interior.xy, marker='o')
+#    plt.show()
