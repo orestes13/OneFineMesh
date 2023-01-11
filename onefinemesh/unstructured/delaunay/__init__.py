@@ -19,7 +19,7 @@ from matplotlib import patches
 
 
 # basic triangle class
-class Triangle(sgeom.Polygon):
+class Triangle:
     def __init__(self, points, ghost=False):
         '''
         Class to overload the sgeom.Polygon class, to allow additional
@@ -42,10 +42,10 @@ class Triangle(sgeom.Polygon):
             theta.append((np.arctan2(vec[1], vec[0]) + 2 * np.pi) % (2 * np.pi))
         idx = np.argsort(theta)
 
-        super().__init__(np.array(points)[idx])
+        self.polygon = sgeom.Polygon(np.array(points)[idx])
         self.vertices = sgeom.MultiPoint(points)
         self.is_ghost = ghost
-        self.centre = self.centroid.coords[0]
+        self.centre = self.polygon.centroid.coords[0]
 
         # circumcircle
         if not self.is_ghost:
@@ -55,12 +55,12 @@ class Triangle(sgeom.Polygon):
 
         # calculate the interior angles
         self.angles = []
-        for i, c in enumerate(self.vertices):
-            c_m = np.array(self.vertices[i - 1])
-            c_p = np.array(self.vertices[(i + 1) % len(self.vertices)])
-            vec_m = np.array(c) - c_m
-            vec_p = np.array(c) - c_p
-            num = np.dot(vec_m, vec_p)
+        for i, c in enumerate(self.vertices.geoms):
+            c_m = np.squeeze(np.array(self.vertices.geoms[i - 1].coords[0]))
+            c_p = np.squeeze(np.array(self.vertices.geoms[(i + 1) % len(self.vertices.geoms)].coords[0]))
+            vec_m = np.array(c.coords[0]) - c_m
+            vec_p = np.array(c.coords[0]) - c_p
+            num = np.dot(np.squeeze(vec_m), np.squeeze(vec_p))
             denom = np.linalg.norm(vec_m) * np.linalg.norm(vec_p)
             self.angles.append(np.arccos(num / denom))
 
@@ -143,11 +143,11 @@ class ConstrainedDelaunayTriangulation(DelaunayTriangulation):
 
         # determine which of the triangles intersect the edges
         self.triangles = np.array(self.triangles)
-        for edge in self.segments:
+        for edge in self.segments.geoms:
             triangles_to_remove = np.zeros(len(self.triangles), dtype=bool)
             for idx, tri in enumerate(self.triangles):
-                if edge.intersects(tri.boundary):
-                    if isinstance(edge.intersection(tri.boundary), sgeom.MultiPoint):
+                if edge.intersects(tri.polygon.boundary):
+                    if isinstance(edge.intersection(tri.polygon.boundary), sgeom.MultiPoint):
                         triangles_to_remove[idx] = True
             bad_triangles = self.triangles[triangles_to_remove]
             self.triangles = self.triangles[~triangles_to_remove]
@@ -159,7 +159,7 @@ class ConstrainedDelaunayTriangulation(DelaunayTriangulation):
                 self.triangles = np.array(self.triangles)
 
         # remove any triangles not in the provided shape
-        self.triangles = [tri for tri in self.triangles if shape.contains(tri)]
+        self.triangles = [tri for tri in self.triangles if shape.contains(tri.polygon)]
 
     # method for adding additional points, as required for refinement
     def insert_point(self, point):
@@ -227,8 +227,8 @@ def insert_point(point, vertices, triangles):
             ghost_normal, edge = ghost_circumcircle(tri, ghost_vertex)
             mid_point = edge.interpolate(0.5, normalized=True)
             line = sgeom.LineString([mid_point, point])
-            vec1 = np.squeeze(np.diff(np.array(ghost_normal), axis=0))
-            vec2 = np.squeeze(np.diff(np.array(line), axis=0))
+            vec1 = np.squeeze(np.diff(np.array(ghost_normal.coords), axis=0))
+            vec2 = np.squeeze(np.diff(np.array(line.coords), axis=0))
             cos_angle = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
             if sgeom.Point(point).intersects(edge) or cos_angle > 0:
                 triangles_to_remove[idx] = True
@@ -243,7 +243,7 @@ def insert_point(point, vertices, triangles):
     # from the triangulation
     good_triangles = list(np.array(triangles)[~triangles_to_remove])
     bad_triangles = list(np.array(triangles)[triangles_to_remove])
-    containing_union = unary_union(bad_triangles)
+    containing_union = unary_union([bt.polygon for bt in bad_triangles])
 
     # remove the containing shape, and construct new triangles
     vertices = vertices.union(point)
@@ -262,35 +262,36 @@ def insert_point(point, vertices, triangles):
                 continue
             else:
                 new_tri = Triangle([x, containing_union.boundary.coords[i +  1],
-                                    np.array(point)])
+                                    np.array(point.coords[0])])
                 tri_points = new_tri.vertices
                 real_points = vertices.intersection(tri_points)
-                if len(real_points) == 3:
+                if len(real_points.geoms) == 3:
                     good_triangles.append(new_tri)
     elif isinstance(containing_union, sgeom.MultiPolygon):
-        for pol in containing_union:
+        for pol in containing_union.geoms:
             for i, x in enumerate(pol.boundary.coords[:-1]):
                 edge = sgeom.LineString([x, pol.boundary.coords[i +  1]])
                 if point.buffer(1e-9).intersects(edge):
                     continue
                 else:
                     new_tri = Triangle([x, pol.boundary.coords[i +  1],
-                                        np.array(point)])
+                                        np.array(point.coords[0])])
                     tri_points = new_tri.vertices
                     real_points = vertices.intersection(tri_points)
-                    if len(real_points) == 3:
+                    if len(real_points.geoms) == 3:
                         good_triangles.append(new_tri)
 
     # recompute ghost triangles
-    ghosts = sgeom.MultiPolygon(ghost_triangles(vertices))
+    ghosts = sgeom.MultiPolygon([gt.polygon for gt in ghost_triangles(vertices)])
     for t in good_triangles:
-        if not t.is_valid:
+        if not t.polygon.is_valid:
             print('invalid triangle', t)
-    new_ghosts = ghosts.difference(unary_union(good_triangles))
-    if isinstance(new_ghosts, sgeom.Polygon):
-        good_triangles.append(Triangle(new_ghosts.exterior.coords[:-1], ghost=True))
-    elif isinstance(new_ghosts, sgeom.MultiPolygon):
-        good_triangles.extend([Triangle(g.exterior.coords[:-1], ghost=True) for g in new_ghosts])
+    new_ghosts = ghosts.difference(unary_union([gt.polygon for gt in good_triangles]))
+    if not new_ghosts.is_empty:
+        if isinstance(new_ghosts, sgeom.Polygon):
+            good_triangles.append(Triangle(new_ghosts.exterior.coords[:-1], ghost=True))
+        elif isinstance(new_ghosts, sgeom.MultiPolygon):
+            good_triangles.extend([Triangle(g.exterior.coords[:-1], ghost=True) for g in new_ghosts.geoms])
 
     triangles = good_triangles
     return vertices, triangles
@@ -404,7 +405,7 @@ def point_within_circumcircle(point, circumcentre, circumradius):
         circumcenrte: the centre of the circumcircle
         circumradius: the radius of the circumcircle
     '''
-    connecting_vector = np.array(point) - np.array(circumcentre)
+    connecting_vector = np.array(point.coords[0]) - np.array(circumcentre.coords[0])
     distance = np.linalg.norm(connecting_vector)
     return distance <= (1 - 1e-9) * circumradius
 
@@ -419,21 +420,25 @@ def circumcircle(triangle):
                   for which to find the circumcircle.
     '''
     # extract the vertices of the triangle
-    p1, p2, p3 = triangle.vertices
+    p1, p2, p3 = triangle.vertices.geoms
+
+    p1_coords = np.squeeze(np.array(p1.coords))
+    p2_coords = np.squeeze(np.array(p2.coords))
+    p3_coords = np.squeeze(np.array(p3.coords))
 
     # calculate the circumcentre and circumradius
     a = np.linalg.det(np.array([[p1.x, p1.y, 1],
                                 [p2.x, p2.y, 1],
                                 [p3.x, p3.y, 1]]))
-    b_x = - np.linalg.det(np.array([[np.dot(p1, p1), p1.y, 1],
-                                    [np.dot(p2, p2), p2.y, 1],
-                                    [np.dot(p3, p3), p3.y, 1]]))
-    b_y = np.linalg.det(np.array([[np.dot(p1, p1), p1.x, 1],
-                                  [np.dot(p2, p2), p2.x, 1],
-                                  [np.dot(p3, p3), p3.x, 1]]))
-    c = - np.linalg.det(np.array([[np.dot(p1, p1), p1.x, p1.y],
-                                  [np.dot(p2, p2), p2.x, p2.y],
-                                  [np.dot(p3, p3), p3.x, p3.y]]))
+    b_x = - np.linalg.det(np.array([[np.dot(p1_coords, p1_coords), p1.y, 1],
+                                    [np.dot(p2_coords, p2_coords), p2.y, 1],
+                                    [np.dot(p3_coords, p3_coords), p3.y, 1]]))
+    b_y = np.linalg.det(np.array([[np.dot(p1_coords, p1_coords), p1.x, 1],
+                                  [np.dot(p2_coords, p2_coords), p2.x, 1],
+                                  [np.dot(p3_coords, p3_coords), p3.x, 1]]))
+    c = - np.linalg.det(np.array([[np.dot(p1_coords, p1_coords), p1.x, p1.y],
+                                  [np.dot(p2_coords, p2_coords), p2.x, p2.y],
+                                  [np.dot(p3_coords, p3_coords), p3.x, p3.y]]))
     x_c = -b_x / (2 * a)
     y_c = -b_y / (2 * a)
     circumcentre = sgeom.Point((x_c, y_c))
@@ -461,13 +466,16 @@ def ghost_circumcircle(triangle, ghost_vertex):
     '''
     # find the edge opposite the ghost vertex
     ball = ghost_vertex.buffer(0.01)
-    vertices = list(zip(*triangle.exterior.xy))
+    vertices = list(zip(*triangle.polygon.exterior.xy))
     edges = []
     for i in range(len(vertices) - 1):
         edges.append(sgeom.LineString([vertices[i], vertices[i + 1]]))
     idx = np.squeeze(np.where([not ball.intersects(edge) for edge in edges]))
-    #print(idx)
-    opposite_edge = edges[idx]
+    try:
+        opposite_edge = edges[idx]
+    except TypeError as err:
+        print(edges, ball, vertices, idx)
+        raise err
 
     # construct the normal to the edge, oriented towards the ghost vertex
     mid_point = opposite_edge.interpolate(0.5, normalized = True)
@@ -490,14 +498,14 @@ def perpendicular_line(line, half_length=0.5):
                      line
     '''
     # slope of line
-    e1, e2 = line.boundary
+    e1, e2 = line.boundary.geoms
     try:
         slope = float(e2.y - e1.y) / (e2.x - e1.x)
     except ZeroDivisionError:
         slope = np.inf
 
     # midpoint of line
-    mid_point = np.array(line.interpolate(0.5, normalized = True))
+    mid_point = np.asarray(line.interpolate(0.5, normalized = True).coords)
 
     # slope of perpendicular line
     if slope == np.inf:
@@ -519,7 +527,7 @@ def perpendicular_line(line, half_length=0.5):
         p1 = mid_point - np.array([x_i, y_i])
         p2 = mid_point + np.array([x_i, y_i])
 
-    return sgeom.LineString([p1, p2])
+    return sgeom.LineString([sgeom.Point(p1), sgeom.Point(p2)])
 
 
 def ghost_triangles(points, infinity=100.0):
@@ -540,22 +548,23 @@ def ghost_triangles(points, infinity=100.0):
     if not isinstance(boundary, sgeom.LineString):
         print('convex hull is type {}'.format(type(boundary)))
     # workaround for co-linear points, whice are missing from the convex hull
-    index = [p.intersects(boundary) for p in points]
-    points_on_boundary = np.array(points)[index]
+    index = [p.intersects(boundary) for p in points.geoms]
+    points_on_boundary = np.array(points.geoms)[index]
     if len(boundary.coords) <= len(points_on_boundary):
         # same length since polygon is closed, so one point is repeated
         centre = convex_hull.centroid
         # sort into (clockwise) order
-        shifted_points = points_on_boundary - np.array(centre)
+        shifted_points = np.array([np.asarray(p.coords[0]) - np.asarray(centre.coords[0]) for p in points_on_boundary])
         angles = np.arctan2(shifted_points[:, 1], shifted_points[:, 0])
-        points_on_boundary = points_on_boundary[np.argsort(angles)]
+        points_on_boundary = np.array(points_on_boundary)[np.argsort(angles)]
+        points_on_boundary = np.asarray([(p.x, p.y) for p in points_on_boundary])
         boundary = sgeom.Polygon(points_on_boundary).boundary
     boundary_lines = []
     for p1, p2 in zip(boundary.coords[:-1], boundary.coords[1:]):
         boundary_lines.append(sgeom.LineString([p1, p2]))
 
     # calculate the ghost triangles
-    ghost_triangles = []
+    triangles_ghost = []
     for line in boundary_lines:
         v1, v2 = line.coords
         midpoint = line.interpolate(0.5, normalized=True)
@@ -564,11 +573,15 @@ def ghost_triangles(points, infinity=100.0):
             normal_segment = sgeom.LineString([midpoint, c])
             if isinstance(normal_segment.intersection(convex_hull), sgeom.LineString):
                 if normal_segment.intersection(convex_hull).length < 1e-12:
-                    ghost_triangles.append(Triangle([c, v1, v2], ghost=True))
+                    t = Triangle([c, v1, v2])
+                    t.is_ghost = True
+                    triangles_ghost.append(t)
             else:
-                ghost_triangles.append(Triangle([c, v1, v2], ghost=True))
+                t = Triangle([c, v1, v2])
+                t.is_ghost = True
+                triangles_ghost.append(t)
 
-    return ghost_triangles
+    return triangles_ghost
 
 #@profile
 def triangulate(points):
@@ -582,9 +595,9 @@ def triangulate(points):
     triangles = []
 
     # choose three random points in the point set to form an initial triangle
-    inserted_points = sgeom.MultiPoint(random.sample(list(points), 3))
+    inserted_points = sgeom.MultiPoint(random.sample(list(points.geoms), 3))
     points = points.difference(inserted_points)
-    initial_triangle = Triangle([(p.x, p.y) for p in inserted_points])
+    initial_triangle = Triangle([(p.x, p.y) for p in inserted_points.geoms])
     triangles.append(initial_triangle)
 
     # calculate the ghost triangles
@@ -592,12 +605,15 @@ def triangulate(points):
 
     # loop through the remaining points in a random order, inserting them
     # into the bounding triangle and constructing the triangulation
-    while len(points) > 0:
-        p = random.choice(points)
+    while len(points.geoms) > 0:
+        p = random.choice(points.geoms)
         try:
             points = sgeom.MultiPoint(points.difference(p))
         except TypeError:
-            points = sgeom.MultiPoint([points.difference(p)])
+            try:
+                points = sgeom.MultiPoint([points.difference(p)])
+            except shapely.errors.EmptyPartError:
+                points = sgeom.MultiPoint()
         inserted_points, triangles = insert_point(p, inserted_points, triangles)
 
     # reset points
@@ -607,16 +623,50 @@ def triangulate(points):
 
 
 if __name__ == "__main__":
+    from matplotlib.textpath import TextPath
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.patches import Polygon
+
+    from shapely import affinity
+
+    def letter_to_polygon(letter, **kwargs):
+        '''
+        Construct a Polygon from a letter.
+
+        Arguments:
+            letter: the letter to be converted to a polygon
+
+        Keyword arguments:
+            anchor:
+            scale:
+            font_properties: font properties
+        '''
+        # parse kwargs
+        anchor = kwargs.get('anchor', (0, 0))
+        scale = kwargs.get('scale', (1, 1))
+        fp = kwargs.get('font_properties', FontProperties(family='DejaVu Sans',
+                                                          weight='bold'))
+
+        # create TextPath, and convert to Polygon
+        let = TextPath(anchor, letter, size=1, prop=fp)
+        polygons = [sgeom.Polygon(pol) for pol in let.to_polygons()]
+        geometry = sgeom.Polygon(polygons[0].boundary.coords,
+                                 holes=[pol.boundary.coords for pol in polygons[1:]])
+
+        geometry = affinity.scale(geometry, xfact=scale[0], yfact=scale[1])
+
+        return geometry
+
     n = 100
     points = sgeom.MultiPoint([np.random.random(2) for _ in range(n)])
 
     filename = "/home/dbentley/code/OneFineMesh/onefinemesh/tests/ne_10m_lakes.shp"
 
-    import fiona
+#    import fiona
     import shapely
-    f = fiona.open(filename)
-    lake_michigan = sgeom.shape([pol for pol in f if pol['properties']['name'] == 'Lake Michigan'][0]['geometry'])
-    lake_superior = sgeom.shape([pol for pol in f if pol['properties']['name'] == 'Lake Superior'][0]['geometry'])
+#    f = fiona.open(filename)
+#    lake_michigan = sgeom.shape([pol for pol in f if pol['properties']['name'] == 'Lake Michigan'][0]['geometry'])
+#    lake_superior = sgeom.shape([pol for pol in f if pol['properties']['name'] == 'Lake Superior'][0]['geometry'])
 
     lines = []
     n = 30
@@ -630,19 +680,36 @@ if __name__ == "__main__":
     lines.append(sgeom.LineString([(2, -2), (-2, -2)]))
     star = sgeom.MultiLineString(lines)
 
-    import sys
-    sys.path.append('../../tests')
-    import alphabet
-
 #    import string
 #    for letter in string.ascii_lowercase:
-    c = alphabet.letter_to_polygon('k')
+    c = letter_to_polygon('g')
 
 #    dt = DelaunayTriangulation(points)
 #    dt = ConformalDelaunayTriangulation(lake_michigan)
 #    dt = ConstrainedDelaunayTriangulation(lake_superior)
 #    dt = ConstrainedDelaunayTriangulation(star)
     dt = ConstrainedDelaunayTriangulation(c)
+
+    fig = plt.figure()
+    fig.add_subplot(1, 2, 1)
+    plt.plot(*c.exterior.xy, color='blue', linewidth=2)
+    for interior in c.interiors:
+        plt.plot(*interior.xy, color='blue', linewidth=2)
+    for t in dt.triangles:
+        plt.plot(*t.polygon.exterior.xy, linewidth=1, color='black')
+    #for e in dt.segments:
+    #    plt.plot(*e.xy, linewidth=2, color='blue')
+    for p in dt.points.geoms:
+        plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
+    fig.add_subplot(1, 2, 2)
+    triangles = shapely_triangulate(dt.points)
+    for t in triangles:
+        plt.plot(*t.exterior.xy, linewidth=1, color='black')
+    for p in dt.points.geoms:
+        plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
+    plt.show()
+
+    sys.exit()
 
     from refinements import ruppert
 
