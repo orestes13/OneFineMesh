@@ -173,7 +173,7 @@ class ConstrainedDelaunayTriangulation(DelaunayTriangulation):
         self.points, triangles = insert_point(point, self.points,
                                               self.triangles)
 
-        self.triangles = [tri for tri in triangles if self.shape.buffer(1e-10).contains(tri)]
+        self.triangles = [tri for tri in triangles if self.shape.buffer(1e-10).contains(tri.polygon)]
 
 
 class ConformalDelaunayTriangulation(ConstrainedDelaunayTriangulation):
@@ -251,6 +251,7 @@ def insert_point(point, vertices, triangles):
     # associate each segment of the containing union with a bad triangle
     if not isinstance(containing_union, (sgeom.Polygon,
                                          sgeom.MultiPolygon)):
+        print(containing_union)
         msg = 'expected the cavity to be of type Polygon or MultiPolygon, got {}'.format(type(containing_union))
         raise TypeError(msg)
 
@@ -711,11 +712,10 @@ if __name__ == "__main__":
         plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
     plt.show()
 
-    sys.exit()
 
     from refinements import ruppert
 
-    ruppert(dt, alpha=30)
+    ruppert(dt, alpha=20)
 
     fig = plt.figure()
     fig.add_subplot(1, 2, 1)
@@ -723,15 +723,15 @@ if __name__ == "__main__":
     for interior in c.interiors:
         plt.plot(*interior.xy, color='blue', linewidth=2)
     for t in dt.triangles:
-        plt.plot(*t.exterior.xy, linewidth=1, color='black')
+        plt.plot(*t.polygon.exterior.xy, linewidth=1, color='black')
     #for e in dt.segments:
     #    plt.plot(*e.xy, linewidth=2, color='blue')
-    for p in dt.points:
+    for p in dt.points.geoms:
         plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
     fig.add_subplot(1, 2, 2)
     triangles = shapely_triangulate(dt.points)
     for t in triangles:
         plt.plot(*t.exterior.xy, linewidth=1, color='black')
-    for p in dt.points:
+    for p in dt.points.geoms:
         plt.plot(*p.buffer(0.01).exterior.xy, color='red', alpha=0.5)
     plt.show()

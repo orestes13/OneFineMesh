@@ -21,7 +21,7 @@ def ruppert(triangulation, alpha=20):
         if alpha > 20.7 then the algorithm is not guaranteed to terminate
     '''
     # get the PSLG segments and vertices from the triangulation
-    segments = list(triangulation.segments)
+    segments = list(triangulation.segments.geoms)
     vertices = triangulation.points
 
     # determine the minimum angle in the triangulation
@@ -33,7 +33,8 @@ def ruppert(triangulation, alpha=20):
     for s in segments:
         cc, cr = diametral_circle(s)
         points_to_check = vertices.difference(s.boundary)
-        if points_within_circle(np.array(vertices.difference(s.boundary)), cc, cr):
+        points_to_check = np.array([p.coords[0] for p in points_to_check.geoms])
+        if points_within_circle(points_to_check, cc, cr):
             encroached_segments.append(s)
 
     while len(encroached_segments) > 0 or len(skinny_triangles) > 0:
@@ -41,27 +42,28 @@ def ruppert(triangulation, alpha=20):
         segments_to_delete = []
         while len(encroached_segments) > 0:
             print('encroached segments: {}'.format(len(encroached_segments)))
+            print(encroached_segments)
             s = encroached_segments.pop()
             # plot encroached segment
-            #cc, cr = diametral_circle(s)
-            #for pp in triangulation.points:
-            #    if points_within_circle(np.array(pp).reshape((1, 2)), cc, cr):
-            #        patch = patches.Polygon(np.array(pp.buffer(0.01).exterior.coords.xy).T,
-            #                                facecolor='red', edgecolor='black')
-            #        plt.gca().add_patch(patch)
-            #    else:
-            #        patch = patches.Polygon(np.array(pp.buffer(0.01).exterior.coords.xy).T,
-            #                                facecolor='none', edgecolor='black')
-            #        plt.gca().add_patch(patch)
-            #for t in triangulation.triangles:
-            #    plt.plot(*t.exterior.xy, color='gray', linestyle='--')
-            #for seg in segments:
-            #    plt.plot(*seg.xy, color='blue', alpha=0.3)
-            #plt.plot(*s.xy, color='blue', linewidth=2)
-            #plt.plot(*sgeom.Point(cc).buffer(cr, resolution=1024).exterior.coords.xy, linestyle='--', color='blue')
-            #plt.xlim([0, 1])
-            #plt.ylim([0, 1])
-            #plt.show()
+            cc, cr = diametral_circle(s)
+            for pp in triangulation.points.geoms:
+                if points_within_circle(np.array(pp.coords[0])[np.newaxis, :], cc, cr):
+                    patch = patches.Polygon(np.array(pp.buffer(0.01).exterior.coords.xy).T,
+                                            facecolor='red', edgecolor='black')
+                    plt.gca().add_patch(patch)
+                else:
+                    patch = patches.Polygon(np.array(pp.buffer(0.01).exterior.coords.xy).T,
+                                            facecolor='none', edgecolor='black')
+                    plt.gca().add_patch(patch)
+            for t in triangulation.triangles:
+                plt.plot(*t.polygon.exterior.xy, color='gray', linestyle='--')
+            for seg in segments:
+                plt.plot(*seg.xy, color='blue', alpha=0.3)
+            plt.plot(*s.xy, color='blue', linewidth=2)
+            plt.plot(*sgeom.Point(cc).buffer(cr, resolution=1024).exterior.coords.xy, linestyle='--', color='blue')
+            plt.xlim([0, 1])
+            plt.ylim([0, 1])
+            plt.show()
 
             segments_to_delete.append(s)
             midpoint = s.interpolate(0.5, normalized=True)
@@ -76,7 +78,8 @@ def ruppert(triangulation, alpha=20):
             for s in segments:
                 cc, cr = diametral_circle(s)
                 points_to_check = vertices.difference(s.boundary)
-                if points_within_circle(np.array(vertices.difference(s.boundary)), cc, cr):
+                points_to_check = np.array([p.coords[0] for p in points_to_check.geoms])
+                if points_within_circle(points_to_check, cc, cr):
                     encroached_segments.append(s)
 
         print('no. of encroached subsegments: {}'.format(len(encroached_segments)))
@@ -92,7 +95,7 @@ def ruppert(triangulation, alpha=20):
             encroaches = False
             for s in segments:
                 cc, cr = diametral_circle(s)
-                if points_within_circle(np.array(p).reshape((1, 2)), cc, cr):
+                if points_within_circle(np.array(p.coords[0])[np.newaxis, :], cc, cr):
                     encroached_segments.append(s)
                     encroaches = True
             if encroaches:
@@ -116,8 +119,8 @@ def split(line, point):
         point: the point with thich to split the segment
     '''
     split_point = shapely.ops.nearest_points(line, point)[0]
-    return (sgeom.LineString([line.boundary[0], split_point]),
-            sgeom.LineString([split_point, line.boundary[1]]))
+    return (sgeom.LineString([line.boundary.geoms[0].coords[0], split_point]),
+            sgeom.LineString([split_point, line.boundary.geoms[1].coords[0]]))
 
 def points_within_circle(points, centre, radius, eps=1e-12):
     '''
@@ -149,7 +152,7 @@ def diametral_circle(segment):
         centred on the midpoint of the segement, and whose diameter is the
         length of the segment)
     '''
-    midpoint = np.array(segment.centroid)
+    midpoint = np.array(segment.centroid.coords[0])
     radius = 0.5 * segment.length
     return midpoint, radius
 
