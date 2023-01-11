@@ -306,12 +306,13 @@ def insert_segment(segment, containing_triangles):
         containing_triangles: the collection of triangles intersected by the
                               segment to be inserted
     '''
-    containing_union = unary_union(containing_triangles)
+    tri_polygons = [t.polygon for t in containing_triangles]
+    containing_union = unary_union(tri_polygons)
     new_triangles = []
 
     # make a list of edges intersecting the segment to be inserted
     intersecting_edges = []
-    for (tri1, tri2) in combinations(containing_triangles, 2):
+    for (tri1, tri2) in combinations(tri_polygons, 2):
         intersection = tri1.intersection(tri2)
         if isinstance(intersection, sgeom.LineString):
             intersecting_edges.append(intersection)
@@ -324,7 +325,7 @@ def insert_segment(segment, containing_triangles):
         edge = random.choice(intersecting_edges)
         intersecting_edges.remove(edge)
         connected_triangles = []
-        for tri in containing_triangles:
+        for tri in tri_polygons:
             if edge.intersects(tri):
                 if isinstance(edge.intersection(tri.boundary), sgeom.LineString):
                     connected_triangles.append(tri)
@@ -334,17 +335,18 @@ def insert_segment(segment, containing_triangles):
             intersecting_edges.insert(0, edge)
             continue
         for tri in connected_triangles:
-            containing_triangles.remove(tri)
-        tri1_coords = tri1.vertices
-        tri2_coords = tri2.vertices
+            tri_polygons.remove(tri)
+        tri1_coords = sgeom.MultiPoint(tri1.exterior.coords)
+        tri2_coords = sgeom.MultiPoint(tri2.exterior.coords)
         connected_vertices = tri1_coords.intersection(tri2_coords)
         unconnected_vertices = tri1_coords.symmetric_difference(tri2_coords)
-        new_edge = sgeom.LineString(list(unconnected_vertices))
+        new_edge = sgeom.LineString(list(unconnected_vertices.geoms))
         flipped_triangles = []
-        for v in connected_vertices:
-            new_tri = Triangle(unconnected_vertices.union(v))
-            flipped_triangles.append(new_tri)
-        containing_triangles.extend(flipped_triangles)
+        for v in connected_vertices.geoms:
+            uv = np.array([geom.coords[0] for geom in unconnected_vertices.union(v).geoms])
+            new_tri = Triangle(uv)
+            flipped_triangles.append(new_tri.polygon)
+        tri_polygons.extend(flipped_triangles)
         # check if the new edge intersects the segment (somewhere other than at
         # the end of the segment))
         if segment.intersects(new_edge):
@@ -359,7 +361,7 @@ def insert_segment(segment, containing_triangles):
 
     new_triangles = []
     for edge in new_edges:
-        for tri in containing_triangles:
+        for tri in tri_polygons:
             if edge.intersects(tri):
                 if isinstance(edge.intersection(tri.boundary), sgeom.LineString):
                     if not any([tri.equals(t) for t in new_triangles]):
@@ -392,7 +394,7 @@ def insert_segment(segment, containing_triangles):
             new_triangles.remove(tri2)
             new_triangles.extend(flipped_triangles)
 
-    return new_triangles
+    return [Triangle(np.asarray(tri.exterior.coords[:-1])) for tri in new_triangles]
 
 
 def point_within_circumcircle(point, circumcentre, circumradius):
